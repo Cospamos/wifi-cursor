@@ -36,9 +36,13 @@ type Envelope struct {
 type MemberInfo struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Addr    string `json:"addr"` // host:port TCP address others should dial
+	Addr    string `json:"addr"` // LAN host:port TCP address others should dial
 	ScreenW int    `json:"screen_w"`
 	ScreenH int    `json:"screen_h"`
+	// PublicAddr is an internet-reachable fallback address, filled in by a
+	// rendezvous server from the connection it saw this member on. Empty
+	// for members only ever discovered over LAN multicast.
+	PublicAddr string `json:"public_addr,omitempty"`
 }
 
 type Hello struct {

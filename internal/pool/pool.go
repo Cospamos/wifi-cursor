@@ -17,22 +17,38 @@ import (
 	"wifi-cursor/internal/discovery"
 	"wifi-cursor/internal/id"
 	"wifi-cursor/internal/protocol"
+	"wifi-cursor/internal/rendezvous"
 )
 
 type Node struct {
 	ID      string
 	Name    string
-	Addr    string
+	Addr    string // LAN address, reachable directly on the same network
 	ScreenW int
 	ScreenH int
+	// PublicAddr is an internet-reachable fallback learned from a
+	// rendezvous server, tried if Addr isn't dialable (different network).
+	PublicAddr string
 }
 
 func (n Node) info() protocol.MemberInfo {
-	return protocol.MemberInfo{ID: n.ID, Name: n.Name, Addr: n.Addr, ScreenW: n.ScreenW, ScreenH: n.ScreenH}
+	return protocol.MemberInfo{ID: n.ID, Name: n.Name, Addr: n.Addr, ScreenW: n.ScreenW, ScreenH: n.ScreenH, PublicAddr: n.PublicAddr}
 }
 
 func fromInfo(m protocol.MemberInfo) Node {
-	return Node{ID: m.ID, Name: m.Name, Addr: m.Addr, ScreenW: m.ScreenW, ScreenH: m.ScreenH}
+	return Node{ID: m.ID, Name: m.Name, Addr: m.Addr, ScreenW: m.ScreenW, ScreenH: m.ScreenH, PublicAddr: m.PublicAddr}
+}
+
+// dialCandidates returns addresses worth trying to reach n, LAN first.
+func dialCandidates(n Node) []string {
+	var out []string
+	if n.Addr != "" {
+		out = append(out, n.Addr)
+	}
+	if n.PublicAddr != "" && n.PublicAddr != n.Addr {
+		out = append(out, n.PublicAddr)
+	}
+	return out
 }
 
 // Handler receives events the cursor engine reacts to. Methods are called
@@ -67,6 +83,7 @@ type Pool struct {
 
 	handler Handler
 	ln      net.Listener
+	rv      *rendezvous.Client // set once connected to a rendezvous server, nil otherwise
 
 	mu            sync.RWMutex
 	members       map[string]Node
@@ -110,11 +127,26 @@ func (p *Pool) listen() error {
 }
 
 // CreatePool starts a brand-new pool with self as its only, active member.
-func (p *Pool) CreatePool() (string, error) {
+// If rvAddr is non-empty, the pool ID is registered with that rendezvous
+// server so devices outside this LAN can find and join it; if the server is
+// unreachable, CreatePool falls back to a locally-generated ID (LAN-only).
+func (p *Pool) CreatePool(rvAddr string) (string, error) {
 	if err := p.listen(); err != nil {
 		return "", err
 	}
-	p.ID = id.PoolID()
+	if rvAddr != "" {
+		if rc, err := rendezvous.Dial(rvAddr, 5*time.Second); err == nil {
+			if poolID, err := rc.Create(p.Self.info()); err == nil {
+				p.ID = poolID
+				p.rv = rc
+			} else {
+				rc.Close()
+			}
+		}
+	}
+	if p.ID == "" {
+		p.ID = id.PoolID()
+	}
 	p.mu.Lock()
 	p.activeID = p.Self.ID
 	p.activeVersion = 1
@@ -122,19 +154,23 @@ func (p *Pool) CreatePool() (string, error) {
 	return p.ID, nil
 }
 
-// JoinPool locates an existing pool by ID over the LAN and merges into it.
-func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, poolID string) error {
+// JoinPool locates an existing pool by ID and connects to it. It tries LAN
+// multicast discovery first (fast, no dependency on the internet or a
+// third party); if that finds nothing and rvAddr is set, it falls back to
+// asking a rendezvous server. Either way, once connected this node also
+// registers with the rendezvous server (when configured) so it is itself
+// discoverable by future joiners regardless of how it found the pool.
+// Pool traffic always stays a direct connection between the two peers.
+func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, rvAddr, poolID string) error {
 	if err := p.listen(); err != nil {
 		return err
 	}
 	p.ID = poolID
 
-	found := disc.FindPool(ctx, poolID, p.Self.ID, p.Self.Name, 3*time.Second)
-	if len(found) == 0 {
-		return fmt.Errorf("пул %s не найден в этой сети (проверьте ID и что оба устройства в одном Wi-Fi)", poolID)
-	}
-
+	connected := false
 	var lastErr error
+
+	found := disc.FindPool(ctx, poolID, p.Self.ID, p.Self.Name, 3*time.Second)
 	for _, f := range found {
 		c, err := net.DialTimeout("tcp4", f.TCPAddr, 4*time.Second)
 		if err != nil {
@@ -145,13 +181,66 @@ func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, poolID string
 			lastErr = err
 			continue
 		}
-		return nil
+		connected = true
+		break
 	}
-	return fmt.Errorf("не удалось подключиться ни к одному участнику пула: %w", lastErr)
+
+	if rvAddr != "" {
+		rc, err := rendezvous.Dial(rvAddr, 5*time.Second)
+		if err != nil {
+			if !connected {
+				return fmt.Errorf("пул %s не найден в локальной сети; сервер обнаружения %s недоступен: %w", poolID, rvAddr, err)
+			}
+		} else {
+			peers, err := rc.Join(poolID, p.Self.info())
+			if err != nil {
+				rc.Close()
+				if !connected {
+					return fmt.Errorf("пул %s не найден ни в локальной сети, ни на сервере обнаружения: %w", poolID, err)
+				}
+			} else {
+				p.rv = rc
+				if !connected {
+					for _, peer := range peers {
+						n := fromInfo(peer.MemberInfo)
+						n.PublicAddr = peer.PublicAddr
+						for _, addr := range dialCandidates(n) {
+							c, err := net.DialTimeout("tcp4", addr, 4*time.Second)
+							if err != nil {
+								lastErr = err
+								continue
+							}
+							if err := p.handshakeDial(c); err != nil {
+								lastErr = err
+								continue
+							}
+							connected = true
+							break
+						}
+						if connected {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if !connected {
+		if lastErr == nil {
+			lastErr = errors.New("устройство не отвечает")
+		}
+		if rvAddr == "" {
+			return fmt.Errorf("пул %s не найден в локальной сети, а сервер обнаружения не задан: %w", poolID, lastErr)
+		}
+		return fmt.Errorf("пул %s найден, но не удалось подключиться напрямую ни к одному участнику (вероятно, NAT/файрвол блокирует входящие): %w", poolID, lastErr)
+	}
+	return nil
 }
 
 // Start launches all background loops: TCP accept, gossip, heartbeat, mesh
-// maintenance and LAN discovery (announcing + answering lookups).
+// maintenance, LAN discovery (announcing + answering lookups) and, if a
+// rendezvous server was used, its push-notification/keepalive loops.
 func (p *Pool) Start(ctx context.Context, disc *discovery.Conn) {
 	go p.acceptLoop(ctx)
 	go p.gossipLoop(ctx)
@@ -159,6 +248,17 @@ func (p *Pool) Start(ctx context.Context, disc *discovery.Conn) {
 	go p.meshMaintenanceLoop(ctx)
 	go disc.AnswerRequests(ctx, p.Self.ID, p.Self.Name, func() string { return p.ID }, func() string { return p.Self.Addr })
 	go disc.AnnouncePresence(ctx, p.Self.ID, p.Self.Name, func() string { return p.ID }, p.Self.Addr, 2*time.Second)
+	if p.rv != nil {
+		go p.rv.Listen(
+			func(peer protocol.RVPeer) {
+				mi := peer.MemberInfo
+				mi.PublicAddr = peer.PublicAddr
+				p.mergeMembers([]protocol.MemberInfo{mi})
+			},
+			func(string) {}, // heartbeat/mesh maintenance already reap departed peers
+		)
+		go p.rv.Keepalive(ctx, 20*time.Second)
+	}
 }
 
 // Leave gracefully notifies peers and tears down the network.
@@ -178,6 +278,9 @@ func (p *Pool) Leave() {
 	}
 	if p.ln != nil {
 		p.ln.Close()
+	}
+	if p.rv != nil {
+		p.rv.Close()
 	}
 }
 
@@ -425,11 +528,15 @@ func (p *Pool) forceDial(n Node) {
 			delete(p.dialing, n.ID)
 			p.mu.Unlock()
 		}()
-		c, err := net.DialTimeout("tcp4", n.Addr, 4*time.Second)
-		if err != nil {
-			return
+		for _, addr := range dialCandidates(n) {
+			c, err := net.DialTimeout("tcp4", addr, 4*time.Second)
+			if err != nil {
+				continue
+			}
+			if p.handshakeDial(c) == nil {
+				return
+			}
 		}
-		_ = p.handshakeDial(c)
 	}()
 }
 

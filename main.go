@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,6 +16,13 @@ import (
 	"wifi-cursor/internal/input"
 	"wifi-cursor/internal/pool"
 )
+
+// defaultRendezvous is the signaling server used to find pools across the
+// internet, where LAN UDP multicast can't reach. It only ever brokers
+// introductions; pool traffic (mouse/cursor events) always stays a direct
+// connection between the two devices. Override with -server, or -server ""
+// to disable it and stay LAN-only.
+const defaultRendezvous = "130.61.130.115:47990"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -35,11 +43,15 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(`wifi-cursor — общий курсор между устройствами по Wi-Fi.
+	fmt.Println(`wifi-cursor — общий курсор между устройствами по Wi-Fi или интернету.
 
 Команды:
-  wifi-cursor create        создать новый пул и получить его ID
-  wifi-cursor join [ID]     подключиться к существующему пулу по ID
+  wifi-cursor create [-server host:port]        создать новый пул и получить его ID
+  wifi-cursor join [-server host:port] [ID]      подключиться к существующему пулу по ID
+
+По умолчанию используется LAN-обнаружение (та же Wi-Fi сеть) и, если оно не
+находит пул, сервер обнаружения на VPS — чтобы можно было подключиться и
+через интернет. -server "" отключает сервер и оставляет только LAN.
 
 Пока утилита запущена:
   Перенесите курсор к левому/правому краю экрана, чтобы передать
@@ -49,13 +61,17 @@ func usage() {
 }
 
 func runCreate() {
+	fs := flag.NewFlagSet("create", flag.ExitOnError)
+	server := fs.String("server", defaultRendezvous, `сервер обнаружения (host:port), "" — только локальная сеть`)
+	_ = fs.Parse(os.Args[2:])
+
 	backend, err := input.NewBackend()
 	fatalIf(err)
 	w, h, err := backend.ScreenSize()
 	fatalIf(err)
 
 	p := pool.New(hostname(), w, h)
-	pid, err := p.CreatePool()
+	pid, err := p.CreatePool(*server)
 	fatalIf(err)
 
 	engine, err := cursor.New(p, backend)
@@ -67,15 +83,19 @@ func runCreate() {
 	defer disc.Close()
 
 	fmt.Printf("Пул создан: %s\n", pid)
-	fmt.Printf("На другом устройстве в этой же Wi-Fi сети выполните:\n  wifi-cursor join %s\n\n", pid)
+	fmt.Printf("На другом устройстве (в той же Wi-Fi сети или через интернет) выполните:\n  wifi-cursor join %s\n\n", pid)
 
 	run(p, engine, disc, backend)
 }
 
 func runJoin() {
+	fs := flag.NewFlagSet("join", flag.ExitOnError)
+	server := fs.String("server", defaultRendezvous, `сервер обнаружения (host:port), "" — только локальная сеть`)
+	_ = fs.Parse(os.Args[2:])
+
 	id := ""
-	if len(os.Args) >= 3 {
-		id = strings.ToUpper(strings.TrimSpace(os.Args[2]))
+	if fs.NArg() >= 1 {
+		id = strings.ToUpper(strings.TrimSpace(fs.Arg(0)))
 	}
 
 	disc, err := discovery.Open()
@@ -91,7 +111,7 @@ func runJoin() {
 				fmt.Printf("  %s  (%s)\n", poolID, d.Name)
 			}
 		} else {
-			fmt.Println("Пока ничего не найдено — можно ввести ID вручную.")
+			fmt.Println("Пока ничего не найдено локально — можно ввести ID вручную (в том числе с другого устройства через интернет).")
 		}
 		fmt.Print("Введите ID пула: ")
 		reader := bufio.NewReader(os.Stdin)
@@ -113,8 +133,8 @@ func runJoin() {
 	fatalIf(err)
 	p.SetHandler(engine)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	err = p.JoinPool(ctx, disc, id)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	err = p.JoinPool(ctx, disc, *server, id)
 	cancel()
 	fatalIf(err)
 
