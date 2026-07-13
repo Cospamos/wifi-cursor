@@ -1,0 +1,19 @@
+services:
+  device-a:
+    build:
+      context: ../..
+      dockerfile: testing/docker/Dockerfile
+    hostname: device-a
+    networks:
+      - lan
+  device-b:
+    build:
+      context: ../..
+      dockerfile: testing/docker/Dockerfile
+    hostname: device-b
+    networks:
+      - lan
+
+networks:
+  lan:
+    driver: bridge
