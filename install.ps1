@@ -65,6 +65,25 @@ if ($AddToPath -match '^(?i:y|yes|д|да)') {
     Write-Host "PATH не трогаю. Запускать так: `"$exePath`"" -ForegroundColor Yellow
 }
 
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# Только private/domain (домашние и корпоративные сети) — на публичных/гостевых
+# Wi-Fi (profile=public) правило нарочно не открывается.
+$fwRuleCmd = "netsh advfirewall firewall add rule name=`"wifi-cursor`" dir=in action=allow program=`"$exePath`" enable=yes profile=private,domain"
+if ($isAdmin) {
+    netsh advfirewall firewall delete rule name="wifi-cursor" program="$exePath" | Out-Null 2>&1
+    netsh advfirewall firewall add rule name="wifi-cursor" dir=in action=allow program="$exePath" enable=yes profile=private,domain | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Добавлено правило брандмауэра для частных/домашних сетей — входящие подключения для wifi-cursor.exe разрешены (Windows Firewall по умолчанию их блокирует, из-за чего create/join не видят друг друга). На публичных/гостевых Wi-Fi правило не действует — это осознанно." -ForegroundColor Green
+    } else {
+        Write-Host "Не удалось добавить правило брандмауэра. Выполните вручную:" -ForegroundColor Yellow
+        Write-Host "  $fwRuleCmd" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "Скрипт запущен без прав администратора — не могу добавить правило брандмауэра автоматически." -ForegroundColor Yellow
+    Write-Host "Если create/join не находят друг друга по сети, откройте PowerShell от имени администратора и выполните:" -ForegroundColor Yellow
+    Write-Host "  $fwRuleCmd" -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "Готово! Запуск:" -ForegroundColor Cyan
 Write-Host "  wifi-cursor create"

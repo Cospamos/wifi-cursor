@@ -161,9 +161,13 @@ cd testing/docker
 
 1. **Брандмауэр Windows.** По умолчанию блокирует входящие подключения к
    непроверенным `.exe` — из-за этого discovery-пакеты просто не доходят.
-   Добавьте разрешающее правило (PowerShell от имени администратора):
+   `install.ps1`, запущенный от имени администратора, добавляет разрешающее
+   правило автоматически — но только для частных/домашних сетей
+   (`profile=private,domain`), на публичном/гостевом Wi-Fi оно намеренно не
+   действует. Если ставили без прав администратора, добавьте правило сами
+   (PowerShell от имени администратора):
    ```powershell
-   netsh advfirewall firewall add rule name="wifi-cursor" dir=in action=allow program="ПУТЬ\wifi-cursor.exe" enable=yes profile=any
+   netsh advfirewall firewall add rule name="wifi-cursor" dir=in action=allow program="ПУТЬ\wifi-cursor.exe" enable=yes profile=private,domain
    ```
 2. **Профиль сети "Общедоступная" (Public) в Windows.** Для него правила
    брандмауэра строже по умолчанию. Параметры → Сеть и Интернет → Wi-Fi →
