@@ -33,7 +33,11 @@ func New(p *pool.Pool, b input.Backend) (*Engine, error) {
 
 var _ pool.Handler = (*Engine)(nil)
 
-// Run drives the engine until ctx is cancelled.
+// Run installs the global mouse/keyboard hook and drives the engine until
+// ctx is cancelled. Callers must only invoke Run after CreatePool/JoinPool
+// has already succeeded: this is the one place the process starts touching
+// system-wide input, so nothing runs before the user has actually entered a
+// pool (no hook, no idle polling loop while just sitting at the prompt).
 func (e *Engine) Run(ctx context.Context) error {
 	events, hotkeys, err := e.backend.Start(ctx)
 	if err != nil {

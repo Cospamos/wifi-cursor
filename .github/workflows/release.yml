@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: go build -o wifi-cursor-windows-amd64.exe .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: wifi-cursor-windows-amd64.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Install X11 build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libx11-dev xorg-dev libxtst-dev libxkbcommon-dev libpng-dev
+      - run: go mod tidy
+      - run: go build -o wifi-cursor-linux-amd64 .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: wifi-cursor-linux-amd64
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-binary
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-binary
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            wifi-cursor-windows-amd64.exe
+            wifi-cursor-linux-amd64
