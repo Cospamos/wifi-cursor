@@ -1,5 +1,8 @@
 # wifi-cursor
 
+[![CI](https://github.com/Cospamos/wifi-cursor/actions/workflows/ci.yml/badge.svg)](https://github.com/Cospamos/wifi-cursor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Cospamos/wifi-cursor)](https://github.com/Cospamos/wifi-cursor/releases/latest)
+
 Один курсор, несколько компьютеров в одной Wi-Fi сети — как с несколькими
 мониторами на одном ПК, только вместо HDMI используется Wi-Fi. Курсор
 переносится на соседнее устройство, если довести его до края экрана, либо
@@ -64,10 +67,15 @@ go build -o wifi-cursor.exe .
 нужен компилятор C и заголовки X11:
 
 ```
-sudo apt install gcc libc6-dev libx11-dev xorg-dev libxtst-dev libxkbcommon-dev libpng-dev
+sudo apt install gcc libc6-dev libx11-dev xorg-dev libxtst-dev libxkbcommon-dev \
+  libxkbcommon-x11-dev libpng-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev
 go mod tidy   # подтянет robotgo и gohook — нужен интернет один раз
 go build -o wifi-cursor .
 ```
+
+Именно этот набор пакетов проверен и используется в CI (`.github/workflows/ci.yml`) —
+если чего-то не хватит на другом дистрибутиве, ориентируйтесь на сообщения
+компилятора о недостающих заголовках (`X11/*.h`, `xkbcommon/*.h`).
 
 Работает поверх X11/Xorg (в том числе XWayland). Чистый Wayland-сеанс без
 XWayland не поддерживается — у XTest там нет доступа.
@@ -139,8 +147,8 @@ wifi-cursor join K4RT9X
 - Секретность пула держится только на случайности 6-символьного ID —
   шифрования или аутентификации соединений нет; не использовать в
   недоверенных сетях.
-- Код написан и проверен вручную (структуры/офсеты Win32, сигнатуры
-  `robotgo`/`gohook` сверены по документации), но не собирался локально —
-  в этом окружении нет ни Go, ни компилятора C. При первой сборке проверьте
-  вывод `go build`/`go vet` и присылайте ошибки, если что-то не так —
-  поправим.
+- Сборка и `go vet` автоматически проверяются в CI на `windows-latest` и
+  `ubuntu-latest` при каждом пуше (см. бейдж выше и `.github/workflows/ci.yml`) —
+  так и был найден и исправлен реальный баг (`DX`/`DY` в `protocol.InputEvent`
+  делили один JSON-тег, из-за чего дельта движения мыши по Y никогда не
+  доходила бы по сети).
