@@ -96,14 +96,14 @@ func (p *Pool) listen() error {
 	if err != nil {
 		return err
 	}
-	ip, err := localIPv4()
+	_, ip, err := discovery.LocalInterface()
 	if err != nil {
 		ln.Close()
 		return err
 	}
 	p.ln = ln
 	p.mu.Lock()
-	p.Self.Addr = fmt.Sprintf("%s:%d", ip, ln.Addr().(*net.TCPAddr).Port)
+	p.Self.Addr = fmt.Sprintf("%s:%d", ip.String(), ln.Addr().(*net.TCPAddr).Port)
 	p.members[p.Self.ID] = p.Self
 	p.mu.Unlock()
 	return nil
@@ -682,32 +682,4 @@ func (p *Pool) SendInputEvent(ev protocol.InputEvent) {
 	if pc != nil {
 		_ = pc.send(protocol.TypeInputEvent, ev)
 	}
-}
-
-func localIPv4() (string, error) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip4 := ipnet.IP.To4()
-			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
-				continue
-			}
-			return ip4.String(), nil
-		}
-	}
-	return "", errors.New("не найден активный IPv4-адрес сети")
 }

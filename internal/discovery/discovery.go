@@ -5,9 +5,12 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
+
+	"golang.org/x/net/ipv4"
 
 	"wifi-cursor/internal/protocol"
 )
@@ -18,6 +21,47 @@ const groupIP = "239.255.42.99"
 
 func groupAddr() *net.UDPAddr {
 	return &net.UDPAddr{IP: net.ParseIP(groupIP), Port: protocol.UDPPort}
+}
+
+// LocalInterface picks the network adapter used for both LAN discovery and
+// the TCP listener's advertised address, so the two always agree on which
+// adapter is "the" Wi-Fi/LAN link.
+//
+// This matters because net.ListenMulticastUDP(..., nil, ...) lets the OS
+// pick a "system-assigned" multicast interface, which on Windows in
+// particular is unreliable: a machine with a VPN client, Hyper-V, WSL or
+// Docker Desktop installed usually has several virtual adapters, and the OS
+// default can silently choose one of those instead of the real Wi-Fi
+// adapter — the join broadcast then never reaches the other device even
+// though both are on the same Wi-Fi network. Pinning an explicit interface
+// fixes both the send and receive path.
+func LocalInterface() (*net.Interface, net.IP, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			iface := iface
+			return &iface, ip4, nil
+		}
+	}
+	return nil, nil, errors.New("не найден активный сетевой интерфейс с IPv4 (Wi-Fi/Ethernet)")
 }
 
 // Received pairs a decoded discovery message with the sender's address, so a
@@ -39,11 +83,24 @@ type Conn struct {
 }
 
 func Open() (*Conn, error) {
-	pc, err := net.ListenMulticastUDP("udp4", nil, groupAddr())
+	ifi, _, err := LocalInterface()
+	if err != nil {
+		return nil, err
+	}
+	pc, err := net.ListenMulticastUDP("udp4", ifi, groupAddr())
 	if err != nil {
 		return nil, err
 	}
 	_ = pc.SetReadBuffer(1 << 16)
+
+	// ListenMulticastUDP only pins the *receive* side (the IGMP join).
+	// Outgoing multicast still needs IP_MULTICAST_IF set explicitly, or the
+	// OS may send it out a different (e.g. virtual) adapter than the one we
+	// just joined the group on.
+	p := ipv4.NewPacketConn(pc)
+	_ = p.SetMulticastInterface(ifi)
+	_ = p.SetMulticastLoopback(true)
+
 	c := &Conn{pc: pc, subs: make(map[int]chan Received)}
 	go c.readLoop()
 	return c, nil

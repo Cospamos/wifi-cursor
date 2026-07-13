@@ -14,6 +14,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+      - run: go mod tidy
       - run: go build ./...
       # unsafeptr is disabled: the WH_MOUSE_LL/WH_KEYBOARD_LL hook callbacks
       # legitimately reinterpret a raw LPARAM as a pointer to the hook
