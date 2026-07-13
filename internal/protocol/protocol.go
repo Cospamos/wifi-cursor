@@ -74,8 +74,9 @@ type RequestJump struct {
 
 type InputEvent struct {
 	Kind    string `json:"kind"` // "move", "down", "up", "wheel"
-	DX, DY  int32  `json:"dx,omitempty"`
-	Button  string `json:"button,omitempty"`  // "left", "right", "middle"
+	DX      int32  `json:"dx,omitempty"`
+	DY      int32  `json:"dy,omitempty"`
+	Button  string `json:"button,omitempty"` // "left", "right", "middle"
 	WheelDY int32  `json:"wheel_dy,omitempty"`
 }
 

@@ -15,7 +15,10 @@ jobs:
         with:
           go-version: "1.22"
       - run: go build ./...
-      - run: go vet ./...
+      # unsafeptr is disabled: the WH_MOUSE_LL/WH_KEYBOARD_LL hook callbacks
+      # legitimately reinterpret a raw LPARAM as a pointer to the hook
+      # struct, which vet's heuristic can't distinguish from a genuine bug.
+      - run: go vet -unsafeptr=false ./...
 
   linux:
     runs-on: ubuntu-latest
@@ -27,7 +30,7 @@ jobs:
       - name: Install X11 build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc libx11-dev xorg-dev libxtst-dev libxkbcommon-dev libpng-dev
+          sudo apt-get install -y gcc libx11-dev xorg-dev libxtst-dev libxkbcommon-dev libpng-dev libx11-xcb-dev libxcb1-dev
       - run: go mod tidy
       - run: go build ./...
       - run: go vet ./...
