@@ -29,8 +29,8 @@ const UDPPort = 47990
 
 // Message types carried inside Envelope.Payload.
 const (
-	TypeHello        = "hello"         // handshake, sent by dialer right after connect
-	TypeMemberSync   = "member_sync"   // anti-entropy: gossiped known-member list
+	TypeHello        = "hello"       // handshake, sent by dialer right after connect
+	TypeMemberSync   = "member_sync" // anti-entropy: gossiped known-member list
 	TypePing         = "ping"
 	TypePong         = "pong"
 	TypeBye          = "bye"           // graceful leave
@@ -84,11 +84,11 @@ type ActiveChange struct {
 }
 
 type FocusHandoff struct {
-	From        string  `json:"from"`
-	To          string  `json:"to"`
-	EntryEdge   string  `json:"entry_edge"` // "left", "right" or "center"
-	EntryRatio  float64 `json:"entry_ratio"`
-	Version     uint64  `json:"version"`
+	From       string  `json:"from"`
+	To         string  `json:"to"`
+	EntryEdge  string  `json:"entry_edge"` // "left", "right" or "center"
+	EntryRatio float64 `json:"entry_ratio"`
+	Version    uint64  `json:"version"`
 }
 
 type RequestJump struct {

@@ -20,31 +20,32 @@ import (
 )
 
 var (
-	user32                    = syscall.NewLazyDLL("user32.dll")
-	procSetWindowsHookExW     = user32.NewProc("SetWindowsHookExW")
-	procCallNextHookEx        = user32.NewProc("CallNextHookEx")
-	procUnhookWindowsHookEx   = user32.NewProc("UnhookWindowsHookEx")
-	procGetMessageW           = user32.NewProc("GetMessageW")
-	procTranslateMessage      = user32.NewProc("TranslateMessage")
-	procDispatchMessageW      = user32.NewProc("DispatchMessageW")
-	procPostThreadMessageW    = user32.NewProc("PostThreadMessageW")
-	procSendInput             = user32.NewProc("SendInput")
-	procSetCursorPos          = user32.NewProc("SetCursorPos")
-	procGetSystemMetrics      = user32.NewProc("GetSystemMetrics")
-	procShowCursor            = user32.NewProc("ShowCursor")
-	procClipCursor            = user32.NewProc("ClipCursor")
-	procRegisterClassExW      = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW       = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW        = user32.NewProc("DefWindowProcW")
-	procRegisterRawInputDevs  = user32.NewProc("RegisterRawInputDevices")
-	procGetRawInputData       = user32.NewProc("GetRawInputData")
-	procCreateCursor          = user32.NewProc("CreateCursor")
-	procSetSystemCursor       = user32.NewProc("SetSystemCursor")
-	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
+	user32                            = syscall.NewLazyDLL("user32.dll")
+	procSetWindowsHookExW             = user32.NewProc("SetWindowsHookExW")
+	procCallNextHookEx                = user32.NewProc("CallNextHookEx")
+	procUnhookWindowsHookEx           = user32.NewProc("UnhookWindowsHookEx")
+	procGetMessageW                   = user32.NewProc("GetMessageW")
+	procTranslateMessage              = user32.NewProc("TranslateMessage")
+	procDispatchMessageW              = user32.NewProc("DispatchMessageW")
+	procPostThreadMessageW            = user32.NewProc("PostThreadMessageW")
+	procSendInput                     = user32.NewProc("SendInput")
+	procSetCursorPos                  = user32.NewProc("SetCursorPos")
+	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
+	procShowCursor                    = user32.NewProc("ShowCursor")
+	procClipCursor                    = user32.NewProc("ClipCursor")
+	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW               = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW                = user32.NewProc("DefWindowProcW")
+	procRegisterRawInputDevs          = user32.NewProc("RegisterRawInputDevices")
+	procGetRawInputData               = user32.NewProc("GetRawInputData")
+	procCreateCursor                  = user32.NewProc("CreateCursor")
+	procSetSystemCursor               = user32.NewProc("SetSystemCursor")
+	procSystemParametersInfoW         = user32.NewProc("SystemParametersInfoW")
+	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 
 	kernel32               = syscall.NewLazyDLL("kernel32.dll")
-	procGetCurrentThreadId  = kernel32.NewProc("GetCurrentThreadId")
-	procGetModuleHandleW    = kernel32.NewProc("GetModuleHandleW")
+	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
+	procGetModuleHandleW   = kernel32.NewProc("GetModuleHandleW")
 )
 
 const (
@@ -94,6 +95,11 @@ const (
 
 	spiSetCursors = 0x0057
 )
+
+// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == ((DPI_AWARENESS_CONTEXT)-4),
+// a sentinel handle value rather than a real pointer (same idiom as
+// HWND_MESSAGE below).
+const dpiAwarenessContextPerMonitorAwareV2 = ^uintptr(3)
 
 // systemCursorIDs covers every OCR_* cursor Windows can display, so
 // replacing all of them hides the pointer regardless of what it's hovering
@@ -226,6 +232,16 @@ type winBackend struct {
 
 // NewBackend constructs the platform input backend.
 func NewBackend() (Backend, error) {
+	// Without declaring DPI awareness, Windows silently virtualizes both
+	// GetSystemMetrics and hook-delivered coordinates for this process to a
+	// 96-DPI-equivalent space, and that virtualization can round
+	// differently depending on monitor layout/scaling - a plausible source
+	// of the screen bounds (and therefore edge-trigger position) not lining
+	// up exactly the same on both sides of the screen. Opting in to
+	// per-monitor DPI awareness makes every coordinate we read or compare
+	// against a real physical pixel, consistently.
+	procSetProcessDpiAwarenessContext.Call(dpiAwarenessContextPerMonitorAwareV2)
+
 	b := &winBackend{}
 	b.passthrough.Store(true)
 	if _, _, err := b.ScreenSize(); err != nil {
