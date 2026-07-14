@@ -32,8 +32,9 @@ func Dial(addr string, timeout time.Duration) (*Client, error) {
 func (c *Client) Close() error { return c.conn.Close() }
 
 // Create registers a brand-new pool and returns its server-assigned ID.
-func (c *Client) Create(self protocol.MemberInfo) (string, error) {
-	if err := c.enc.Send(protocol.RVCreate, protocol.RVCreateReq{Self: self}); err != nil {
+// passHash is protocol.HashPassword(password); empty means no password.
+func (c *Client) Create(self protocol.MemberInfo, passHash string) (string, error) {
+	if err := c.enc.Send(protocol.RVCreate, protocol.RVCreateReq{Self: self, PassHash: passHash}); err != nil {
 		return "", err
 	}
 	msg, err := c.recvRegistered()
@@ -44,9 +45,10 @@ func (c *Client) Create(self protocol.MemberInfo) (string, error) {
 }
 
 // Join registers self as a member of an existing pool and returns its
-// current members (not including self).
-func (c *Client) Join(poolID string, self protocol.MemberInfo) ([]protocol.RVPeer, error) {
-	if err := c.enc.Send(protocol.RVJoin, protocol.RVJoinReq{PoolID: poolID, Self: self}); err != nil {
+// current members (not including self). Fails if the pool has a password
+// and passHash doesn't match it.
+func (c *Client) Join(poolID string, self protocol.MemberInfo, passHash string) ([]protocol.RVPeer, error) {
+	if err := c.enc.Send(protocol.RVJoin, protocol.RVJoinReq{PoolID: poolID, Self: self, PassHash: passHash}); err != nil {
 		return nil, err
 	}
 	msg, err := c.recvRegistered()

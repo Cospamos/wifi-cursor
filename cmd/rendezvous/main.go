@@ -32,9 +32,10 @@ func (c *client) send(msgType string, payload interface{}) error {
 }
 
 type poolState struct {
-	mu      sync.Mutex
-	members map[string]protocol.RVPeer
-	clients map[string]*client
+	mu       sync.Mutex
+	passHash string
+	members  map[string]protocol.RVPeer
+	clients  map[string]*client
 }
 
 type server struct {
@@ -126,6 +127,8 @@ func (s *server) handleConn(c net.Conn) {
 
 	var poolID string
 	var self protocol.MemberInfo
+	var passHash string
+	newPool := false
 
 	switch env.Type {
 	case protocol.RVCreate:
@@ -134,7 +137,9 @@ func (s *server) handleConn(c net.Conn) {
 			return
 		}
 		self = req.Self
+		passHash = req.PassHash
 		poolID = s.newPoolID()
+		newPool = true
 
 	case protocol.RVJoin:
 		var req protocol.RVJoinReq
@@ -143,8 +148,16 @@ func (s *server) handleConn(c net.Conn) {
 		}
 		self = req.Self
 		poolID = req.PoolID
-		if _, exists := s.getPool(poolID); !exists {
+		existing, exists := s.getPool(poolID)
+		if !exists {
 			_ = enc.Send(protocol.RVError, protocol.RVErrorMsg{Message: fmt.Sprintf("пул %s не найден", poolID)})
+			return
+		}
+		existing.mu.Lock()
+		wantHash := existing.passHash
+		existing.mu.Unlock()
+		if wantHash != "" && req.PassHash != wantHash {
+			_ = enc.Send(protocol.RVError, protocol.RVErrorMsg{Message: "неверный пароль пула"})
 			return
 		}
 
@@ -153,6 +166,11 @@ func (s *server) handleConn(c net.Conn) {
 	}
 
 	pool := s.getOrCreatePool(poolID)
+	if newPool {
+		pool.mu.Lock()
+		pool.passHash = passHash
+		pool.mu.Unlock()
+	}
 	me := protocol.RVPeer{MemberInfo: self, PublicAddr: publicAddr}
 
 	pool.mu.Lock()

@@ -46,12 +46,16 @@ func usage() {
 	fmt.Println(`wifi-cursor — общий курсор между устройствами по Wi-Fi или интернету.
 
 Команды:
-  wifi-cursor create [-server host:port]        создать новый пул и получить его ID
-  wifi-cursor join [-server host:port] [ID]      подключиться к существующему пулу по ID
+  wifi-cursor create [-server host:port] [-password pass]    создать новый пул
+  wifi-cursor join [-server host:port] [-password pass] [ID] подключиться к пулу
 
 По умолчанию используется LAN-обнаружение (та же Wi-Fi сеть) и, если оно не
 находит пул, сервер обнаружения на VPS — чтобы можно было подключиться и
 через интернет. -server "" отключает сервер и оставляет только LAN.
+
+-password защищает пул общим паролем (без него любой, кто узнает ID —
+например, случайным перебором — сможет подключиться). Все устройства пула
+должны указать один и тот же пароль.
 
 Пока утилита запущена:
   Перенесите курсор к левому/правому краю экрана, чтобы передать
@@ -63,6 +67,7 @@ func usage() {
 func runCreate() {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 	server := fs.String("server", defaultRendezvous, `сервер обнаружения (host:port), "" — только локальная сеть`)
+	password := fs.String("password", "", "пароль пула (пусто — без пароля)")
 	_ = fs.Parse(os.Args[2:])
 
 	backend, err := input.NewBackend()
@@ -71,7 +76,7 @@ func runCreate() {
 	fatalIf(err)
 
 	p := pool.New(hostname(), w, h)
-	pid, err := p.CreatePool(*server)
+	pid, err := p.CreatePool(*server, *password)
 	fatalIf(err)
 
 	engine, err := cursor.New(p, backend)
@@ -91,6 +96,7 @@ func runCreate() {
 func runJoin() {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	server := fs.String("server", defaultRendezvous, `сервер обнаружения (host:port), "" — только локальная сеть`)
+	password := fs.String("password", "", "пароль пула (должен совпадать с тем, что задан на create)")
 	_ = fs.Parse(os.Args[2:])
 
 	id := ""
@@ -134,7 +140,7 @@ func runJoin() {
 	p.SetHandler(engine)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	err = p.JoinPool(ctx, disc, *server, id)
+	err = p.JoinPool(ctx, disc, *server, id, *password)
 	cancel()
 	fatalIf(err)
 

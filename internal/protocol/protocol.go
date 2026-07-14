@@ -5,11 +5,24 @@ package protocol
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 )
+
+// HashPassword turns a pool password into the value carried on the wire, so
+// the plaintext itself is never transmitted. Empty password -> empty hash,
+// which means "no password required" throughout the protocol.
+func HashPassword(password string) string {
+	if password == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(sum[:])
+}
 
 // UDPPort is used for both presence beacons and pool lookup requests.
 const UDPPort = 47990
@@ -21,6 +34,7 @@ const (
 	TypePing         = "ping"
 	TypePong         = "pong"
 	TypeBye          = "bye"           // graceful leave
+	TypeReject       = "reject"        // handshake refused (e.g. wrong password)
 	TypeActiveChange = "active_change" // gossiped: who currently owns the cursor
 	TypeFocusHandoff = "focus_handoff" // sent directly to the node that should become active
 	TypeRequestJump  = "request_jump"  // hotkey: ask the current active node to hand off to a target
@@ -46,8 +60,13 @@ type MemberInfo struct {
 }
 
 type Hello struct {
-	Self   MemberInfo `json:"self"`
-	PoolID string     `json:"pool_id"`
+	Self     MemberInfo `json:"self"`
+	PoolID   string     `json:"pool_id"`
+	PassHash string     `json:"pass_hash,omitempty"`
+}
+
+type RejectMsg struct {
+	Reason string `json:"reason"`
 }
 
 type MemberSync struct {

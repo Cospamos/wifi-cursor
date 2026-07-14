@@ -26,11 +26,15 @@ type RVPeer struct {
 
 type RVCreateReq struct {
 	Self MemberInfo `json:"self"`
+	// PassHash, when non-empty, locks the pool: RVJoin must present the same
+	// hash or be rejected. Empty means no password (anyone with the ID).
+	PassHash string `json:"pass_hash,omitempty"`
 }
 
 type RVJoinReq struct {
-	PoolID string     `json:"pool_id"`
-	Self   MemberInfo `json:"self"`
+	PoolID   string     `json:"pool_id"`
+	Self     MemberInfo `json:"self"`
+	PassHash string     `json:"pass_hash,omitempty"`
 }
 
 // RVRegisteredMsg is the reply to both RVCreate and RVJoin: the pool ID

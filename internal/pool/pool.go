@@ -81,9 +81,10 @@ type Pool struct {
 	ID   string
 	Self Node
 
-	handler Handler
-	ln      net.Listener
-	rv      *rendezvous.Client // set once connected to a rendezvous server, nil otherwise
+	handler  Handler
+	ln       net.Listener
+	rv       *rendezvous.Client // set once connected to a rendezvous server, nil otherwise
+	passHash string             // protocol.HashPassword(password); empty = no password required
 
 	mu            sync.RWMutex
 	members       map[string]Node
@@ -130,13 +131,14 @@ func (p *Pool) listen() error {
 // If rvAddr is non-empty, the pool ID is registered with that rendezvous
 // server so devices outside this LAN can find and join it; if the server is
 // unreachable, CreatePool falls back to a locally-generated ID (LAN-only).
-func (p *Pool) CreatePool(rvAddr string) (string, error) {
+func (p *Pool) CreatePool(rvAddr, password string) (string, error) {
 	if err := p.listen(); err != nil {
 		return "", err
 	}
+	p.passHash = protocol.HashPassword(password)
 	if rvAddr != "" {
 		if rc, err := rendezvous.Dial(rvAddr, 5*time.Second); err == nil {
-			if poolID, err := rc.Create(p.Self.info()); err == nil {
+			if poolID, err := rc.Create(p.Self.info(), p.passHash); err == nil {
 				p.ID = poolID
 				p.rv = rc
 			} else {
@@ -161,11 +163,12 @@ func (p *Pool) CreatePool(rvAddr string) (string, error) {
 // registers with the rendezvous server (when configured) so it is itself
 // discoverable by future joiners regardless of how it found the pool.
 // Pool traffic always stays a direct connection between the two peers.
-func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, rvAddr, poolID string) error {
+func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, rvAddr, poolID, password string) error {
 	if err := p.listen(); err != nil {
 		return err
 	}
 	p.ID = poolID
+	p.passHash = protocol.HashPassword(password)
 
 	connected := false
 	var lastErr error
@@ -192,7 +195,7 @@ func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, rvAddr, poolI
 				return fmt.Errorf("пул %s не найден в локальной сети; сервер обнаружения %s недоступен: %w", poolID, rvAddr, err)
 			}
 		} else {
-			peers, err := rc.Join(poolID, p.Self.info())
+			peers, err := rc.Join(poolID, p.Self.info(), p.passHash)
 			if err != nil {
 				rc.Close()
 				if !connected {
@@ -290,7 +293,7 @@ func (p *Pool) handshakeDial(c net.Conn) error {
 	enc := protocol.NewEncoder(c)
 	dec := protocol.NewDecoder(c)
 
-	if err := enc.Send(protocol.TypeHello, protocol.Hello{Self: p.Self.info(), PoolID: p.ID}); err != nil {
+	if err := enc.Send(protocol.TypeHello, protocol.Hello{Self: p.Self.info(), PoolID: p.ID, PassHash: p.passHash}); err != nil {
 		c.Close()
 		return err
 	}
@@ -298,6 +301,15 @@ func (p *Pool) handshakeDial(c net.Conn) error {
 	if err != nil {
 		c.Close()
 		return err
+	}
+	if env.Type == protocol.TypeReject {
+		var rej protocol.RejectMsg
+		_ = json.Unmarshal(env.Payload, &rej)
+		c.Close()
+		if rej.Reason != "" {
+			return fmt.Errorf("отклонено участником: %s", rej.Reason)
+		}
+		return errors.New("отклонено участником")
 	}
 	if env.Type != protocol.TypeHello {
 		c.Close()
@@ -366,12 +378,17 @@ func (p *Pool) handleAccept(c net.Conn) {
 		c.Close()
 		return
 	}
+	if p.passHash != "" && hello.PassHash != p.passHash {
+		_ = enc.Send(protocol.TypeReject, protocol.RejectMsg{Reason: "неверный пароль пула"})
+		c.Close()
+		return
+	}
 	peer := fromInfo(hello.Self)
 	p.mu.Lock()
 	p.members[peer.ID] = peer
 	p.mu.Unlock()
 
-	if err := enc.Send(protocol.TypeHello, protocol.Hello{Self: p.Self.info(), PoolID: p.ID}); err != nil {
+	if err := enc.Send(protocol.TypeHello, protocol.Hello{Self: p.Self.info(), PoolID: p.ID, PassHash: p.passHash}); err != nil {
 		c.Close()
 		return
 	}
