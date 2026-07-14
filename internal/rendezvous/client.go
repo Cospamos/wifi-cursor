@@ -78,10 +78,11 @@ func (c *Client) recvRegistered() (protocol.RVRegisteredMsg, error) {
 	return msg, nil
 }
 
-// Listen streams peer-joined/peer-left events pushed by the server until the
-// connection closes. Meant to run in its own goroutine for the lifetime of
-// pool membership.
-func (c *Client) Listen(onJoined func(protocol.RVPeer), onLeft func(nodeID string)) {
+// Listen streams events pushed by the server until the connection closes:
+// peers joining/leaving, and relay offers (someone else couldn't reach this
+// node directly and asked the server to broker a relay session instead).
+// Meant to run in its own goroutine for the lifetime of pool membership.
+func (c *Client) Listen(onJoined func(protocol.RVPeer), onLeft func(nodeID string), onRelayOffer func(protocol.RVRelayOfferMsg)) {
 	for {
 		env, err := c.dec.Recv()
 		if err != nil {
@@ -98,8 +99,38 @@ func (c *Client) Listen(onJoined func(protocol.RVPeer), onLeft func(nodeID strin
 			if json.Unmarshal(env.Payload, &e) == nil && onLeft != nil {
 				onLeft(e.NodeID)
 			}
+		case protocol.RVRelayOffer:
+			var e protocol.RVRelayOfferMsg
+			if json.Unmarshal(env.Payload, &e) == nil && onRelayOffer != nil {
+				onRelayOffer(e)
+			}
 		}
 	}
+}
+
+// RequestRelay asks the server to broker a relay session with another pool
+// member, identified by token (caller-generated, used to pair up both legs
+// on the relay port). Used as a fallback when a direct dial to that member
+// failed.
+func (c *Client) RequestRelay(toNodeID, token string) error {
+	return c.enc.Send(protocol.RVRelayRequest, protocol.RVRelayRequestMsg{ToNodeID: toNodeID, Token: token})
+}
+
+// DialRelay connects to the server's relay data-plane port and joins the
+// given session token. Once the matching leg (the other peer, or this node
+// answering an RVRelayOffer) also joins with the same token, the server
+// pipes bytes between them and the returned conn behaves like a direct
+// connection to that peer.
+func DialRelay(relayAddr, token string, timeout time.Duration) (net.Conn, error) {
+	c, err := net.DialTimeout("tcp4", relayAddr, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := protocol.NewEncoder(c).Send(protocol.RVRelayJoin, protocol.RVRelayJoinMsg{Token: token}); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
 // Keepalive periodically pings the server so the control connection isn't

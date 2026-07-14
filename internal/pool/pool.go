@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -51,6 +52,21 @@ func dialCandidates(n Node) []string {
 	return out
 }
 
+// relayAddrFrom derives the rendezvous server's relay data-plane address
+// from its control address: same host, port+1. Returns "" if rvAddr can't
+// be parsed as host:port.
+func relayAddrFrom(rvAddr string) string {
+	host, portStr, err := net.SplitHostPort(rvAddr)
+	if err != nil {
+		return ""
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port+1))
+}
+
 // Handler receives events the cursor engine reacts to. Methods are called
 // from pool-internal goroutines and must return quickly.
 type Handler interface {
@@ -81,10 +97,11 @@ type Pool struct {
 	ID   string
 	Self Node
 
-	handler  Handler
-	ln       net.Listener
-	rv       *rendezvous.Client // set once connected to a rendezvous server, nil otherwise
-	passHash string             // protocol.HashPassword(password); empty = no password required
+	handler   Handler
+	ln        net.Listener
+	rv        *rendezvous.Client // set once connected to a rendezvous server, nil otherwise
+	relayAddr string             // rendezvous server's relay data-plane address, "" if none configured
+	passHash  string             // protocol.HashPassword(password); empty = no password required
 
 	mu            sync.RWMutex
 	members       map[string]Node
@@ -137,6 +154,7 @@ func (p *Pool) CreatePool(rvAddr, password string) (string, error) {
 	}
 	p.passHash = protocol.HashPassword(password)
 	if rvAddr != "" {
+		p.relayAddr = relayAddrFrom(rvAddr)
 		if rc, err := rendezvous.Dial(rvAddr, 5*time.Second); err == nil {
 			if poolID, err := rc.Create(p.Self.info(), p.passHash); err == nil {
 				p.ID = poolID
@@ -162,25 +180,28 @@ func (p *Pool) CreatePool(rvAddr, password string) (string, error) {
 // asking a rendezvous server. Either way, once connected this node also
 // registers with the rendezvous server (when configured) so it is itself
 // discoverable by future joiners regardless of how it found the pool.
-// Pool traffic always stays a direct connection between the two peers.
+// Every dial tries a direct connection first; if that fails for every known
+// address (e.g. both sides are behind NAT with no port forwarding),
+// dialAndHandshake automatically falls back to relaying that one
+// connection through the rendezvous server — every other pair still
+// connects directly.
 func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, rvAddr, poolID, password string) error {
 	if err := p.listen(); err != nil {
 		return err
 	}
 	p.ID = poolID
 	p.passHash = protocol.HashPassword(password)
+	if rvAddr != "" {
+		p.relayAddr = relayAddrFrom(rvAddr)
+	}
 
 	connected := false
 	var lastErr error
 
 	found := disc.FindPool(ctx, poolID, p.Self.ID, p.Self.Name, 3*time.Second)
 	for _, f := range found {
-		c, err := net.DialTimeout("tcp4", f.TCPAddr, 4*time.Second)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if err := p.handshakeDial(c); err != nil {
+		n := Node{ID: f.NodeID, Name: f.Name, Addr: f.TCPAddr}
+		if err := p.dialAndHandshake(n); err != nil {
 			lastErr = err
 			continue
 		}
@@ -207,22 +228,12 @@ func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, rvAddr, poolI
 					for _, peer := range peers {
 						n := fromInfo(peer.MemberInfo)
 						n.PublicAddr = peer.PublicAddr
-						for _, addr := range dialCandidates(n) {
-							c, err := net.DialTimeout("tcp4", addr, 4*time.Second)
-							if err != nil {
-								lastErr = err
-								continue
-							}
-							if err := p.handshakeDial(c); err != nil {
-								lastErr = err
-								continue
-							}
-							connected = true
-							break
+						if err := p.dialAndHandshake(n); err != nil {
+							lastErr = err
+							continue
 						}
-						if connected {
-							break
-						}
+						connected = true
+						break
 					}
 				}
 			}
@@ -236,9 +247,50 @@ func (p *Pool) JoinPool(ctx context.Context, disc *discovery.Conn, rvAddr, poolI
 		if rvAddr == "" {
 			return fmt.Errorf("пул %s не найден в локальной сети, а сервер обнаружения не задан: %w", poolID, lastErr)
 		}
-		return fmt.Errorf("пул %s найден, но не удалось подключиться напрямую ни к одному участнику (вероятно, NAT/файрвол блокирует входящие): %w", poolID, lastErr)
+		return fmt.Errorf("пул %s найден, но подключиться не удалось (включая через релей): %w", poolID, lastErr)
 	}
 	return nil
+}
+
+// dialAndHandshake tries every direct address for n in turn, and if all of
+// them fail, falls back to asking the rendezvous server to relay the
+// connection (only possible if this node has one configured, i.e. joined
+// with -server).
+func (p *Pool) dialAndHandshake(n Node) error {
+	var lastErr error
+	for _, addr := range dialCandidates(n) {
+		c, err := net.DialTimeout("tcp4", addr, 4*time.Second)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := p.handshakeDial(c); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if p.rv != nil && p.relayAddr != "" && n.ID != "" {
+		c, err := p.dialViaRelay(n)
+		if err != nil {
+			return fmt.Errorf("прямое подключение не удалось (%v), релей тоже не удался: %w", lastErr, err)
+		}
+		return p.handshakeDial(c)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("нет доступных адресов")
+	}
+	return lastErr
+}
+
+// dialViaRelay asks the rendezvous server to broker a relay session with n
+// and connects to it. Used only once every direct dial candidate failed.
+func (p *Pool) dialViaRelay(n Node) (net.Conn, error) {
+	token := id.NodeID()
+	if err := p.rv.RequestRelay(n.ID, token); err != nil {
+		return nil, err
+	}
+	return rendezvous.DialRelay(p.relayAddr, token, 8*time.Second)
 }
 
 // Start launches all background loops: TCP accept, gossip, heartbeat, mesh
@@ -259,6 +311,16 @@ func (p *Pool) Start(ctx context.Context, disc *discovery.Conn) {
 				p.mergeMembers([]protocol.MemberInfo{mi})
 			},
 			func(string) {}, // heartbeat/mesh maintenance already reap departed peers
+			func(offer protocol.RVRelayOfferMsg) {
+				// Someone couldn't reach us directly and asked the server to
+				// relay instead; join the same session from our side and
+				// treat the resulting conn as a normal incoming connection.
+				c, err := rendezvous.DialRelay(p.relayAddr, offer.Token, 8*time.Second)
+				if err != nil {
+					return
+				}
+				p.handleAccept(c)
+			},
 		)
 		go p.rv.Keepalive(ctx, 20*time.Second)
 	}
@@ -545,15 +607,7 @@ func (p *Pool) forceDial(n Node) {
 			delete(p.dialing, n.ID)
 			p.mu.Unlock()
 		}()
-		for _, addr := range dialCandidates(n) {
-			c, err := net.DialTimeout("tcp4", addr, 4*time.Second)
-			if err != nil {
-				continue
-			}
-			if p.handshakeDial(c) == nil {
-				return
-			}
-		}
+		_ = p.dialAndHandshake(n)
 	}()
 }
 

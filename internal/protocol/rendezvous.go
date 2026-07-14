@@ -13,6 +13,14 @@ const (
 	RVPeerLeft   = "rv_peer_left"   // server -> client: pushed when a member disconnects
 	RVPing       = "rv_ping"
 	RVPong       = "rv_pong"
+
+	// Relay fallback, used only when a direct P2P dial between two members
+	// fails (e.g. both are behind NAT with no port forwarding). Everything
+	// else keeps connecting directly; this just gives that one pair a way
+	// to still reach each other, routed through the server.
+	RVRelayRequest = "rv_relay_request" // requester -> server, on its control conn: relay me to a peer
+	RVRelayOffer   = "rv_relay_offer"   // server -> target peer's control conn: someone wants a relay session
+	RVRelayJoin    = "rv_relay_join"    // either leg -> server, on the raw relay port: pair me under this token
 )
 
 // RVPeer is a pool member as known to the rendezvous server.
@@ -55,4 +63,18 @@ type RVPeerEvent struct {
 
 type RVPeerLeftMsg struct {
 	NodeID string `json:"node_id"`
+}
+
+type RVRelayRequestMsg struct {
+	ToNodeID string `json:"to_node_id"`
+	Token    string `json:"token"`
+}
+
+type RVRelayOfferMsg struct {
+	FromNodeID string `json:"from_node_id"`
+	Token      string `json:"token"`
+}
+
+type RVRelayJoinMsg struct {
+	Token string `json:"token"`
 }

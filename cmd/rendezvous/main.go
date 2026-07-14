@@ -92,14 +92,22 @@ func (s *server) dropPoolIfEmpty(poolID string) {
 }
 
 func main() {
-	addr := flag.String("addr", ":47990", "TCP listen address")
+	addr := flag.String("addr", ":47990", "TCP listen address (control/signaling)")
+	relayAddr := flag.String("relay-addr", ":47991", "TCP listen address (relay data plane, fallback for NATed pairs)")
 	flag.Parse()
 
 	ln, err := net.Listen("tcp4", *addr)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("wifi-cursor rendezvous server listening on %s", *addr)
+	relayLn, err := net.Listen("tcp4", *relayAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("wifi-cursor rendezvous server listening on %s (control) and %s (relay)", *addr, *relayAddr)
+
+	hub := newRelayHub()
+	go hub.serve(relayLn)
 
 	srv := newServer()
 	for {
@@ -217,8 +225,20 @@ func (s *server) handleConn(c net.Conn) {
 		if err != nil {
 			return
 		}
-		if env.Type == protocol.RVPing {
+		switch env.Type {
+		case protocol.RVPing:
 			_ = myClient.send(protocol.RVPong, struct{}{})
+		case protocol.RVRelayRequest:
+			var req protocol.RVRelayRequestMsg
+			if json.Unmarshal(env.Payload, &req) != nil {
+				continue
+			}
+			pool.mu.Lock()
+			target, ok := pool.clients[req.ToNodeID]
+			pool.mu.Unlock()
+			if ok {
+				_ = target.send(protocol.RVRelayOffer, protocol.RVRelayOfferMsg{FromNodeID: me.ID, Token: req.Token})
+			}
 		}
 	}
 }
