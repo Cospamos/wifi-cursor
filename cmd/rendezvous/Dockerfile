@@ -9,5 +9,5 @@ RUN CGO_ENABLED=0 go build -o /rendezvous ./cmd/rendezvous
 
 FROM alpine:latest
 COPY --from=build /rendezvous /usr/local/bin/rendezvous
-EXPOSE 47990
+EXPOSE 47990 47991
 ENTRYPOINT ["/usr/local/bin/rendezvous"]
