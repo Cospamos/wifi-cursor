@@ -351,7 +351,20 @@ func (p *Pool) Leave() {
 
 // --- handshake ---
 
+// setNoDelay disables Nagle's algorithm. Without this, the small,
+// latency-sensitive messages this protocol sends constantly (mouse move
+// deltas above all) can sit buffered for tens of milliseconds waiting to be
+// coalesced with more data or for a delayed ACK, which is what made cursor
+// movement feel like it was running at ~15-20Hz instead of the mouse's
+// actual polling rate.
+func setNoDelay(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+}
+
 func (p *Pool) handshakeDial(c net.Conn) error {
+	setNoDelay(c)
 	enc := protocol.NewEncoder(c)
 	dec := protocol.NewDecoder(c)
 
@@ -423,6 +436,7 @@ func (p *Pool) acceptLoop(ctx context.Context) {
 }
 
 func (p *Pool) handleAccept(c net.Conn) {
+	setNoDelay(c)
 	dec := protocol.NewDecoder(c)
 	enc := protocol.NewEncoder(c)
 

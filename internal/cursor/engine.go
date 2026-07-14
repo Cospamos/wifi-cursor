@@ -7,11 +7,19 @@ package cursor
 import (
 	"context"
 	"sync"
+	"time"
 
 	"wifi-cursor/internal/input"
 	"wifi-cursor/internal/pool"
 	"wifi-cursor/internal/protocol"
 )
+
+// edgeCooldown suppresses edge re-triggering for a short window after this
+// node becomes active. Without it, landing near the entry edge and
+// continuing the same physical mouse gesture that caused the crossing (or
+// simple jitter/overshoot) can immediately re-trigger a handoff back,
+// producing a rapid back-and-forth "ping-pong" between two screens.
+const edgeCooldown = 400 * time.Millisecond
 
 type Engine struct {
 	pool    *pool.Pool
@@ -19,8 +27,20 @@ type Engine struct {
 
 	screenW, screenH int
 
-	mu       sync.Mutex
-	amActive bool
+	mu          sync.Mutex
+	amActive    bool
+	activeSince time.Time
+}
+
+// setActive updates amActive and, when becoming active, stamps activeSince
+// so checkEdge can enforce edgeCooldown.
+func (e *Engine) setActive(active bool) {
+	e.mu.Lock()
+	e.amActive = active
+	if active {
+		e.activeSince = time.Now()
+	}
+	e.mu.Unlock()
 }
 
 func New(p *pool.Pool, b input.Backend) (*Engine, error) {
@@ -44,10 +64,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		return err
 	}
 
-	e.mu.Lock()
-	e.amActive = e.pool.IsActive()
-	e.mu.Unlock()
-	_ = e.backend.SetPassthrough(e.amActive)
+	initialActive := e.pool.IsActive()
+	e.setActive(initialActive)
+	_ = e.backend.SetPassthrough(initialActive)
 
 	for {
 		select {
@@ -85,6 +104,13 @@ func (e *Engine) handleLocalEvent(ev input.Event) {
 }
 
 func (e *Engine) checkEdge(x, y int) {
+	e.mu.Lock()
+	sinceActive := time.Since(e.activeSince)
+	e.mu.Unlock()
+	if sinceActive < edgeCooldown {
+		return
+	}
+
 	var edge string
 	switch {
 	case x <= 0:
@@ -162,9 +188,7 @@ func (e *Engine) performHandoff(target, entryEdge string, ratio float64) {
 
 	if err := e.pool.SendFocusHandoff(target, entryEdge, ratio); err != nil {
 		// Target unreachable: reclaim the cursor rather than stranding it.
-		e.mu.Lock()
-		e.amActive = true
-		e.mu.Unlock()
+		e.setActive(true)
 		_ = e.backend.SetPassthrough(true)
 	}
 }
@@ -175,13 +199,15 @@ func (e *Engine) OnFocusHandoff(msg protocol.FocusHandoff) {
 	if msg.To != e.pool.Self.ID {
 		return
 	}
-	e.mu.Lock()
-	e.amActive = true
-	e.mu.Unlock()
-
+	e.setActive(true)
+	// Passthrough must be enabled *before* warping: otherwise the hook is
+	// still in forwarding mode when the warp's own echo arrives, which gets
+	// misread as a genuine (huge) forwarded move and recenters the cursor
+	// right back away from the entry point — this was the root cause of the
+	// screen-edge "ping-pong" bug together with the missing cooldown above.
+	_ = e.backend.SetPassthrough(true)
 	x, y := e.entryPoint(msg.EntryEdge, msg.EntryRatio)
 	_ = e.backend.WarpTo(x, y)
-	_ = e.backend.SetPassthrough(true)
 }
 
 func (e *Engine) entryPoint(edge string, ratio float64) (int, int) {
@@ -210,11 +236,12 @@ func (e *Engine) OnActiveChange(newActiveID string) {
 	amActive := newActiveID == e.pool.Self.ID
 	e.mu.Lock()
 	changed := e.amActive != amActive
-	e.amActive = amActive
 	e.mu.Unlock()
-	if changed {
-		_ = e.backend.SetPassthrough(amActive)
+	if !changed {
+		return
 	}
+	e.setActive(amActive)
+	_ = e.backend.SetPassthrough(amActive)
 }
 
 func (e *Engine) OnRequestJump(fromID, targetID string) {

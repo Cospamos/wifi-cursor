@@ -11,10 +11,20 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-vgo/robotgo"
 	hook "github.com/robotn/gohook"
 )
+
+// warpGrace is how long after we programmatically recenter the cursor that
+// we treat incoming move events as possibly being the echo of that
+// recenter rather than genuine motion. Time-based rather than "wait for an
+// event whose position exactly matches the recenter target": X11 may or
+// may not report XWarpPointer-induced motion through the same path gohook
+// uses to capture real hardware motion, and a match-based flag that never
+// gets cleared would silently wedge forwarding shut forever.
+const warpGrace = 30 * time.Millisecond
 
 type linuxBackend struct {
 	events  chan Event
@@ -24,9 +34,9 @@ type linuxBackend struct {
 	lastX, lastY     int32
 	screenW, screenH int32
 	centerX, centerY int32
+	warpUntil        time.Time
 
-	passthrough   atomic.Bool
-	expectingWarp atomic.Bool
+	passthrough atomic.Bool
 
 	endOnce sync.Once
 }
@@ -93,23 +103,24 @@ func (b *linuxBackend) onMove(x, y int) {
 		b.emit(Event{Kind: Move, X: x, Y: y})
 		return
 	}
-	if b.expectingWarp.Load() {
-		if int32(x) == b.centerX && int32(y) == b.centerY {
-			b.expectingWarp.Store(false)
-		}
-		b.mu.Lock()
-		b.lastX, b.lastY = int32(x), int32(y)
-		b.mu.Unlock()
-		return
-	}
+
 	b.mu.Lock()
 	dx, dy := int32(x)-b.lastX, int32(y)-b.lastY
 	b.lastX, b.lastY = int32(x), int32(y)
+	inGrace := time.Now().Before(b.warpUntil)
 	b.mu.Unlock()
+
+	if inGrace {
+		// Likely the echo of our own recenter (or arrived too soon after it
+		// to trust the delta); don't forward it and don't re-warp again yet.
+		return
+	}
 	if dx != 0 || dy != 0 {
 		b.emit(Event{Kind: Move, DX: int(dx), DY: int(dy)})
 	}
-	b.expectingWarp.Store(true)
+	b.mu.Lock()
+	b.warpUntil = time.Now().Add(warpGrace)
+	b.mu.Unlock()
 	robotgo.Move(int(b.centerX), int(b.centerY))
 }
 
@@ -155,8 +166,8 @@ func (b *linuxBackend) SetPassthrough(enabled bool) error {
 	if !enabled {
 		b.mu.Lock()
 		b.lastX, b.lastY = b.centerX, b.centerY
+		b.warpUntil = time.Now().Add(warpGrace)
 		b.mu.Unlock()
-		b.expectingWarp.Store(true)
 		robotgo.Move(int(b.centerX), int(b.centerY))
 	}
 	return nil
