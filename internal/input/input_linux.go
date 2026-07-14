@@ -1,9 +1,30 @@
 //go:build linux
 
 // Linux backend: built on robotgo (inject) and gohook (capture), both
-// backed by X11 (XTest/XRecord). Requires a running X server and, to build,
-// a C toolchain plus libx11-dev/libxtst-dev/libxkbcommon-dev (see README).
+// backed by X11 (XTest/XRecord), plus a couple of direct Xfixes calls (via
+// cgo) for cursor hiding, which neither library exposes. Requires a running
+// X server and, to build, a C toolchain plus
+// libx11-dev/libxtst-dev/libxkbcommon-dev/libxfixes-dev (see README).
 package input
+
+/*
+#cgo pkg-config: x11 xfixes
+#include <X11/Xlib.h>
+#include <X11/extensions/Xfixes.h>
+
+static void wc_hide_cursor(Display *d) {
+    Window root = DefaultRootWindow(d);
+    XFixesHideCursor(d, root);
+    XFlush(d);
+}
+
+static void wc_show_cursor(Display *d) {
+    Window root = DefaultRootWindow(d);
+    XFixesShowCursor(d, root);
+    XFlush(d);
+}
+*/
+import "C"
 
 import (
 	"context"
@@ -26,6 +47,15 @@ import (
 // gets cleared would silently wedge forwarding shut forever.
 const warpGrace = 30 * time.Millisecond
 
+// edgeMargin: only recenter the cursor once it gets this close to running
+// off the screen, instead of after every single move event. Recentering
+// unavoidably costs one warpGrace suppression window each time it happens,
+// so recentering on every event was capping forwarded movement at roughly
+// 1/warpGrace events per second - this is what made movement feel choppy.
+// With a margin, the common case (cursor comfortably mid-screen) never
+// touches the warp/grace machinery at all.
+const edgeMargin = 100
+
 type linuxBackend struct {
 	events  chan Event
 	hotkeys chan HotkeyEvent
@@ -37,6 +67,7 @@ type linuxBackend struct {
 	warpUntil        time.Time
 
 	passthrough atomic.Bool
+	xdisplay    *C.Display
 
 	endOnce sync.Once
 }
@@ -48,6 +79,10 @@ func NewBackend() (Backend, error) {
 	if _, _, err := b.ScreenSize(); err != nil {
 		return nil, err
 	}
+	// A nil xdisplay (X server unreachable in some unusual way even though
+	// robotgo/gohook above already connected fine) just means cursor hiding
+	// silently becomes a no-op - not worth failing backend construction over.
+	b.xdisplay = C.XOpenDisplay(nil)
 	return b, nil
 }
 
@@ -118,7 +153,15 @@ func (b *linuxBackend) onMove(x, y int) {
 	if dx != 0 || dy != 0 {
 		b.emit(Event{Kind: Move, DX: int(dx), DY: int(dy)})
 	}
+
+	if x < edgeMargin || y < edgeMargin || x > int(b.screenW)-edgeMargin || y > int(b.screenH)-edgeMargin {
+		b.recenter()
+	}
+}
+
+func (b *linuxBackend) recenter() {
 	b.mu.Lock()
+	b.lastX, b.lastY = b.centerX, b.centerY
 	b.warpUntil = time.Now().Add(warpGrace)
 	b.mu.Unlock()
 	robotgo.Move(int(b.centerX), int(b.centerY))
@@ -154,21 +197,19 @@ func (b *linuxBackend) WarpTo(x, y int) error {
 	return nil
 }
 
-// SetPassthrough(false) recenters the cursor on every move so it can travel
-// indefinitely, matching the Windows backend's trick. Unlike Windows, this
-// build has no reliable cross-desktop-environment API for hiding/clipping
-// the system cursor, so it stays visible and will visibly jump back to the
-// screen center while this node is forwarding input elsewhere.
 func (b *linuxBackend) SetPassthrough(enabled bool) error {
 	if b.passthrough.Swap(enabled) == enabled {
 		return nil
 	}
-	if !enabled {
-		b.mu.Lock()
-		b.lastX, b.lastY = b.centerX, b.centerY
-		b.warpUntil = time.Now().Add(warpGrace)
-		b.mu.Unlock()
-		robotgo.Move(int(b.centerX), int(b.centerY))
+	if enabled {
+		if b.xdisplay != nil {
+			C.wc_show_cursor(b.xdisplay)
+		}
+		return nil
+	}
+	b.recenter()
+	if b.xdisplay != nil {
+		C.wc_hide_cursor(b.xdisplay)
 	}
 	return nil
 }

@@ -31,7 +31,7 @@ jobs:
       - name: Install X11 build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc libx11-dev xorg-dev libxtst-dev libxkbcommon-dev libxkbcommon-x11-dev libpng-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev
+          sudo apt-get install -y gcc pkg-config libx11-dev xorg-dev libxtst-dev libxkbcommon-dev libxkbcommon-x11-dev libpng-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libxfixes-dev
       - run: go mod tidy
       - run: go build ./...
       - run: go vet ./...

@@ -38,6 +38,9 @@ var (
 	procDefWindowProcW        = user32.NewProc("DefWindowProcW")
 	procRegisterRawInputDevs  = user32.NewProc("RegisterRawInputDevices")
 	procGetRawInputData       = user32.NewProc("GetRawInputData")
+	procCreateCursor          = user32.NewProc("CreateCursor")
+	procSetSystemCursor       = user32.NewProc("SetSystemCursor")
+	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
 
 	kernel32               = syscall.NewLazyDLL("kernel32.dll")
 	procGetCurrentThreadId  = kernel32.NewProc("GetCurrentThreadId")
@@ -88,7 +91,31 @@ const (
 	riMouseUsage   = 0x02
 	riUsagePageGen = 0x01
 	rimTypeMouse   = 0
+
+	spiSetCursors = 0x0057
 )
+
+// systemCursorIDs covers every OCR_* cursor Windows can display, so
+// replacing all of them hides the pointer regardless of what it's hovering
+// over (text field, resize handle, link, ...).
+var systemCursorIDs = []uint32{
+	32512, // OCR_NORMAL
+	32513, // OCR_IBEAM
+	32514, // OCR_WAIT
+	32515, // OCR_CROSS
+	32516, // OCR_UP
+	32640, // OCR_SIZE
+	32641, // OCR_ICON
+	32642, // OCR_SIZENWSE
+	32643, // OCR_SIZENESW
+	32644, // OCR_SIZEWE
+	32645, // OCR_SIZENS
+	32646, // OCR_SIZEALL
+	32648, // OCR_NO
+	32649, // OCR_HAND
+	32650, // OCR_APPSTARTING
+	32651, // OCR_HELP
+}
 
 type point struct{ X, Y int32 }
 
@@ -433,6 +460,32 @@ func (b *winBackend) emit(ev Event) {
 	}
 }
 
+// hideSystemCursors replaces every system cursor resource with a fully
+// transparent one. ShowCursor(FALSE) alone isn't reliable here: it only
+// affects the calling thread's display counter, and the actually-visible
+// cursor is composited based on the foreground window, which belongs to
+// some other process/thread entirely - so a background hook thread calling
+// ShowCursor often has no visible effect at all. Replacing the shared
+// system cursor resources works regardless of which window has focus.
+func hideSystemCursors() {
+	and := [2]byte{0xFF, 0xFF} // 1x1 monochrome cursor, fully transparent
+	xor := [2]byte{0x00, 0x00}
+	for _, id := range systemCursorIDs {
+		h, _, _ := procCreateCursor.Call(0, 0, 0, 1, 1, uintptr(unsafe.Pointer(&and[0])), uintptr(unsafe.Pointer(&xor[0])))
+		if h != 0 {
+			// SetSystemCursor takes ownership of h; a fresh cursor is needed
+			// per ID rather than reusing one handle across multiple calls.
+			procSetSystemCursor.Call(h, uintptr(id))
+		}
+	}
+}
+
+// restoreSystemCursors reloads the user's normal cursor scheme, undoing
+// hideSystemCursors.
+func restoreSystemCursors() {
+	procSystemParametersInfoW.Call(spiSetCursors, 0, 0, 0)
+}
+
 func (b *winBackend) WarpTo(x, y int) error {
 	r, _, err := procSetCursorPos.Call(uintptr(int32(x)), uintptr(int32(y)))
 	if r == 0 {
@@ -447,12 +500,14 @@ func (b *winBackend) SetPassthrough(enabled bool) error {
 	}
 	if enabled {
 		procClipCursor.Call(0)
+		restoreSystemCursors()
 		procShowCursor.Call(1)
 		return nil
 	}
 	rect := struct{ Left, Top, Right, Bottom int32 }{b.centerX, b.centerY, b.centerX + 1, b.centerY + 1}
 	procClipCursor.Call(uintptr(unsafe.Pointer(&rect)))
 	procSetCursorPos.Call(uintptr(b.centerX), uintptr(b.centerY))
+	hideSystemCursors()
 	procShowCursor.Call(0)
 	return nil
 }
