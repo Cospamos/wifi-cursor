@@ -151,7 +151,11 @@ func (b *linuxBackend) onMove(x, y int) {
 		return
 	}
 	if dx != 0 || dy != 0 {
-		b.emit(Event{Kind: Move, DX: int(dx), DY: int(dy)})
+		// gohook/libuiohook reports Y motion on X11 inverted relative to the
+		// down-positive screen convention every receiver (SendInput on
+		// Windows, robotgo.MoveRelative here) expects, so up arrived as
+		// down and vice versa once forwarded. Flip it at the source.
+		b.emit(Event{Kind: Move, DX: int(dx), DY: int(-dy)})
 	}
 
 	if x < edgeMargin || y < edgeMargin || x > int(b.screenW)-edgeMargin || y > int(b.screenH)-edgeMargin {
