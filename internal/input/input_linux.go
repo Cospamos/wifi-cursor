@@ -68,6 +68,7 @@ type linuxBackend struct {
 
 	passthrough atomic.Bool
 	xdisplay    *C.Display
+	wayland     *waylandCursorHider
 
 	endOnce sync.Once
 }
@@ -83,6 +84,7 @@ func NewBackend() (Backend, error) {
 	// robotgo/gohook above already connected fine) just means cursor hiding
 	// silently becomes a no-op - not worth failing backend construction over.
 	b.xdisplay = C.XOpenDisplay(nil)
+	b.wayland = newWaylandCursorHider()
 	return b, nil
 }
 
@@ -151,10 +153,7 @@ func (b *linuxBackend) onMove(x, y int) {
 		return
 	}
 	if dx != 0 || dy != 0 {
-		// gohook/libuiohook reports motion on X11 inverted on both axes
-		// relative to what every receiver (SendInput on Windows,
-		// robotgo.MoveRelative here) expects. Flip both at the source.
-		b.emit(Event{Kind: Move, DX: int(-dx), DY: int(-dy)})
+		b.emit(Event{Kind: Move, DX: int(dx), DY: int(dy)})
 	}
 
 	if x < edgeMargin || y < edgeMargin || x > int(b.screenW)-edgeMargin || y > int(b.screenH)-edgeMargin {
@@ -208,12 +207,14 @@ func (b *linuxBackend) SetPassthrough(enabled bool) error {
 		if b.xdisplay != nil {
 			C.wc_show_cursor(b.xdisplay)
 		}
+		b.wayland.show()
 		return nil
 	}
 	b.recenter()
 	if b.xdisplay != nil {
 		C.wc_hide_cursor(b.xdisplay)
 	}
+	b.wayland.hide()
 	return nil
 }
 
