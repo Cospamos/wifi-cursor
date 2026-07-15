@@ -23,6 +23,25 @@ static void wc_show_cursor(Display *d) {
     XFixesShowCursor(d, root);
     XFlush(d);
 }
+
+// XRecord (which gohook/libuiohook use to capture events) is read-only: it
+// can report events but can't stop them reaching their normal destination.
+// A grab is the only way to actually keep a click/scroll from also acting
+// on this desktop while we forward it elsewhere - grabbed events still
+// reach XRecord independently, so capture-for-forwarding keeps working.
+static int wc_grab_pointer(Display *d) {
+    Window root = DefaultRootWindow(d);
+    int r = XGrabPointer(d, root, False,
+        ButtonPressMask | ButtonReleaseMask,
+        GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+    XFlush(d);
+    return r;
+}
+
+static void wc_ungrab_pointer(Display *d) {
+    XUngrabPointer(d, CurrentTime);
+    XFlush(d);
+}
 */
 import "C"
 
@@ -205,6 +224,7 @@ func (b *linuxBackend) SetPassthrough(enabled bool) error {
 	}
 	if enabled {
 		if b.xdisplay != nil {
+			C.wc_ungrab_pointer(b.xdisplay)
 			C.wc_show_cursor(b.xdisplay)
 		}
 		b.wayland.show()
@@ -213,6 +233,7 @@ func (b *linuxBackend) SetPassthrough(enabled bool) error {
 	b.recenter()
 	if b.xdisplay != nil {
 		C.wc_hide_cursor(b.xdisplay)
+		C.wc_grab_pointer(b.xdisplay)
 	}
 	b.wayland.hide()
 	return nil

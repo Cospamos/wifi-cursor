@@ -94,6 +94,11 @@ const (
 	rimTypeMouse   = 0
 
 	spiSetCursors = 0x0057
+
+	// wheelDelta: Windows always reports/expects wheel motion in multiples
+	// of this per notch (WHEEL_DELTA). The wire protocol uses plain notch
+	// counts instead, so both ends can inject in their own native units.
+	wheelDelta = 120
 )
 
 // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == ((DPI_AWARENESS_CONTEXT)-4),
@@ -339,7 +344,9 @@ func (b *winBackend) runMessageLoop(ready chan<- error) {
 
 	mouseCB := syscall.NewCallback(func(nCode int, wParam, lParam uintptr) uintptr {
 		if nCode == hcAction {
-			b.onRawMouse(uint32(wParam), (*msllhookstruct)(unsafe.Pointer(lParam)))
+			if b.onRawMouse(uint32(wParam), (*msllhookstruct)(unsafe.Pointer(lParam))) {
+				return 1 // swallow: don't let it also act locally while forwarding
+			}
 		}
 		ret, _, _ := procCallNextHookEx.Call(0, uintptr(nCode), wParam, lParam)
 		return ret
@@ -389,9 +396,13 @@ func (b *winBackend) stop() {
 }
 
 // onRawMouse handles the low-level hook: absolute position while active
-// (passthrough, for edge detection), and buttons/wheel unconditionally —
-// neither is affected by ClipCursor the way position deltas would be.
-func (b *winBackend) onRawMouse(wParam uint32, info *msllhookstruct) {
+// (passthrough, for edge detection) - movement is never blocked, ClipCursor
+// already confines it while forwarding. Buttons/wheel are always captured
+// for forwarding, and now also *swallowed* (return true) while forwarding
+// is active, so a scroll/click doesn't also act on this machine at the same
+// time it's forwarded - previously they reached the local desktop
+// unconditionally since ClipCursor doesn't do anything to stop that.
+func (b *winBackend) onRawMouse(wParam uint32, info *msllhookstruct) (swallow bool) {
 	switch wParam {
 	case wmMouseMove:
 		if b.passthrough.Load() {
@@ -399,6 +410,7 @@ func (b *winBackend) onRawMouse(wParam uint32, info *msllhookstruct) {
 		}
 		// Forwarding-mode deltas come from Raw Input (onRawInput) instead of
 		// from this hook's absolute position — see onRawInput for why.
+		return false
 	case wmLButtonDown:
 		b.emit(Event{Kind: ButtonDown, Button: Left})
 	case wmLButtonUp:
@@ -413,8 +425,11 @@ func (b *winBackend) onRawMouse(wParam uint32, info *msllhookstruct) {
 		b.emit(Event{Kind: ButtonUp, Button: Middle})
 	case wmMouseWheel:
 		delta := int16(info.MouseData >> 16)
-		b.emit(Event{Kind: Wheel, WheelDY: int(delta)})
+		b.emit(Event{Kind: Wheel, WheelDY: int(delta) / wheelDelta})
+	default:
+		return false
 	}
+	return !b.passthrough.Load()
 }
 
 // onRawInput handles WM_INPUT: while forwarding (not active), this is the
@@ -537,7 +552,7 @@ func (b *winBackend) Inject(ev Event) error {
 	case ButtonUp:
 		sendMouseInput(mouseInputC{DwFlags: buttonFlag(ev.Button, false)})
 	case Wheel:
-		sendMouseInput(mouseInputC{MouseData: uint32(int32(ev.WheelDY)), DwFlags: mouseeventfWheel})
+		sendMouseInput(mouseInputC{MouseData: uint32(int32(ev.WheelDY) * wheelDelta), DwFlags: mouseeventfWheel})
 	}
 	return nil
 }

@@ -57,6 +57,10 @@ func usage() {
 например, случайным перебором — сможет подключиться). Все устройства пула
 должны указать один и тот же пароль.
 
+-invert-scroll переворачивает направление прокрутки колеса при её пересылке
+с этого устройства (например, если на нём включена "естественная
+прокрутка", а на устройстве назначения — нет).
+
 Пока утилита запущена:
   Перенесите курсор к левому/правому краю экрана, чтобы передать
   управление соседнему устройству в пуле.
@@ -68,6 +72,7 @@ func runCreate() {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 	server := fs.String("server", defaultRendezvous, `сервер обнаружения (host:port), "" — только локальная сеть`)
 	password := fs.String("password", "", "пароль пула (пусто — без пароля)")
+	invertScroll := fs.Bool("invert-scroll", false, "перевернуть направление прокрутки при пересылке с этого устройства")
 	_ = fs.Parse(os.Args[2:])
 
 	backend, err := input.NewBackend()
@@ -79,7 +84,7 @@ func runCreate() {
 	pid, err := p.CreatePool(*server, *password)
 	fatalIf(err)
 
-	engine, err := cursor.New(p, backend)
+	engine, err := cursor.New(p, backend, *invertScroll)
 	fatalIf(err)
 	p.SetHandler(engine)
 
@@ -97,6 +102,7 @@ func runJoin() {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	server := fs.String("server", defaultRendezvous, `сервер обнаружения (host:port), "" — только локальная сеть`)
 	password := fs.String("password", "", "пароль пула (должен совпадать с тем, что задан на create)")
+	invertScroll := fs.Bool("invert-scroll", false, "перевернуть направление прокрутки при пересылке с этого устройства")
 	_ = fs.Parse(os.Args[2:])
 
 	id := ""
@@ -135,7 +141,7 @@ func runJoin() {
 	fatalIf(err)
 
 	p := pool.New(hostname(), w, h)
-	engine, err := cursor.New(p, backend)
+	engine, err := cursor.New(p, backend, *invertScroll)
 	fatalIf(err)
 	p.SetHandler(engine)
 

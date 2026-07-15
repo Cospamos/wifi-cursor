@@ -26,6 +26,7 @@ type Engine struct {
 	backend input.Backend
 
 	screenW, screenH int
+	invertScroll     bool
 
 	mu          sync.Mutex
 	amActive    bool
@@ -43,12 +44,16 @@ func (e *Engine) setActive(active bool) {
 	e.mu.Unlock()
 }
 
-func New(p *pool.Pool, b input.Backend) (*Engine, error) {
+// invertScroll flips forwarded wheel direction. There's no reliable way to
+// auto-detect this: whether it's needed depends on the sending machine's
+// own OS-level scroll-direction preference (e.g. Linux "natural scrolling"),
+// which isn't something the receiving side can see.
+func New(p *pool.Pool, b input.Backend, invertScroll bool) (*Engine, error) {
 	w, h, err := b.ScreenSize()
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{pool: p, backend: b, screenW: w, screenH: h}, nil
+	return &Engine{pool: p, backend: b, screenW: w, screenH: h, invertScroll: invertScroll}, nil
 }
 
 var _ pool.Handler = (*Engine)(nil)
@@ -100,7 +105,7 @@ func (e *Engine) handleLocalEvent(ev input.Event) {
 
 	// Forwarding mode: this node isn't showing the cursor, but a human is
 	// still touching its physical mouse — relay raw input to whoever is.
-	e.pool.SendInputEvent(toProtocolEvent(ev))
+	e.pool.SendInputEvent(toProtocolEvent(ev, e.invertScroll))
 }
 
 func (e *Engine) checkEdge(x, y int) {
@@ -258,7 +263,7 @@ func (e *Engine) OnMembersChanged() {}
 
 // --- conversions ---
 
-func toProtocolEvent(ev input.Event) protocol.InputEvent {
+func toProtocolEvent(ev input.Event, invertScroll bool) protocol.InputEvent {
 	pe := protocol.InputEvent{}
 	switch ev.Kind {
 	case input.Move:
@@ -272,7 +277,11 @@ func toProtocolEvent(ev input.Event) protocol.InputEvent {
 		pe.Button = buttonStr(ev.Button)
 	case input.Wheel:
 		pe.Kind = "wheel"
-		pe.WheelDY = int32(ev.WheelDY)
+		wy := ev.WheelDY
+		if invertScroll {
+			wy = -wy
+		}
+		pe.WheelDY = int32(wy)
 	}
 	return pe
 }
