@@ -551,7 +551,7 @@ func (p *Pool) dispatch(fromID string, env protocol.Envelope) {
 	case protocol.TypeFocusHandoff:
 		var f protocol.FocusHandoff
 		if json.Unmarshal(env.Payload, &f) == nil {
-			p.adoptActive(f.To, f.Version)
+			p.adoptActiveBookkeeping(f.To, f.Version)
 			if p.handler != nil {
 				p.handler.OnFocusHandoff(f)
 			}
@@ -626,18 +626,27 @@ func (p *Pool) forceDial(n Node) {
 }
 
 func (p *Pool) adoptActive(newID string, version uint64) {
+	if p.adoptActiveBookkeeping(newID, version) && p.handler != nil {
+		p.handler.OnActiveChange(newID)
+	}
+}
+
+// adoptActiveBookkeeping updates activeID/activeVersion and reports whether
+// this actually changed anything, without notifying the handler - used by
+// the FocusHandoff case, which calls OnFocusHandoff right after and already
+// performs the full transition (SetPassthrough *and* the entry-point warp);
+// going through adoptActive too would additionally fire OnActiveChange for
+// the same transition a second time.
+func (p *Pool) adoptActiveBookkeeping(newID string, version uint64) bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.activeVersion != 0 && version <= p.activeVersion {
-		p.mu.Unlock()
-		return
+		return false
 	}
 	changed := newID != p.activeID
 	p.activeID = newID
 	p.activeVersion = version
-	p.mu.Unlock()
-	if changed && p.handler != nil {
-		p.handler.OnActiveChange(newID)
-	}
+	return changed
 }
 
 // electActive is called after the currently active member disappears.
