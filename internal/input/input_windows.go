@@ -233,6 +233,12 @@ type winBackend struct {
 	passthrough atomic.Bool
 	ctrlDown    atomic.Bool
 	altDown     atomic.Bool
+
+	// wheelAccum carries the remainder when a WM_MOUSEWHEEL delta doesn't
+	// divide evenly by wheelDelta - see onRawMouse. Only ever touched from
+	// the hook callback, which always runs on the single message-loop
+	// thread, so no lock needed.
+	wheelAccum int32
 }
 
 // NewBackend constructs the platform input backend.
@@ -424,8 +430,21 @@ func (b *winBackend) onRawMouse(wParam uint32, info *msllhookstruct) (swallow bo
 	case wmMButtonUp:
 		b.emit(Event{Kind: ButtonUp, Button: Middle})
 	case wmMouseWheel:
+		// Not every device reports clean multiples of wheelDelta (120) per
+		// notch - precision touchpads and some "smooth scroll" mice send
+		// finer deltas (e.g. 40) to support inertial scrolling. A plain
+		// delta/wheelDelta division truncates those to 0 and the scroll is
+		// silently lost, which on a device that never happens to send a
+		// full 120 at once means it never forwards *any* scroll at all.
+		// Accumulate instead, so partial notches carry over and eventually
+		// add up to a real one.
 		delta := int16(info.MouseData >> 16)
-		b.emit(Event{Kind: Wheel, WheelDY: int(delta) / wheelDelta})
+		b.wheelAccum += int32(delta)
+		notches := b.wheelAccum / wheelDelta
+		b.wheelAccum -= notches * wheelDelta
+		if notches != 0 {
+			b.emit(Event{Kind: Wheel, WheelDY: int(notches)})
+		}
 	default:
 		return false
 	}

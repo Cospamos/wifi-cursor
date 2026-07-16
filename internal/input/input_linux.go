@@ -12,6 +12,19 @@ package input
 #include <X11/Xlib.h>
 #include <X11/extensions/Xfixes.h>
 
+// Xlib is only safe to use from more than one thread (or from goroutines
+// that Go's scheduler can move between OS threads, which is exactly what
+// happens here: SetPassthrough is called from the pool's network-dispatch
+// goroutine and from the hotkey path, not always the same OS thread) once
+// XInitThreads has run - and it must run before any other Xlib call in the
+// process, including whatever connection robotgo/gohook open internally.
+// Without it, concurrent use is undefined behavior: not necessarily a
+// crash, just as likely a silently corrupted request queue, which would
+// look exactly like "the grab sometimes doesn't take effect".
+static void wc_init_threads() {
+    XInitThreads();
+}
+
 static void wc_hide_cursor(Display *d) {
     Window root = DefaultRootWindow(d);
     XFixesHideCursor(d, root);
@@ -94,6 +107,10 @@ type linuxBackend struct {
 
 // NewBackend constructs the platform input backend.
 func NewBackend() (Backend, error) {
+	// Must happen before any other Xlib call in the process - including the
+	// one ScreenSize() is about to make via robotgo - see wc_init_threads.
+	C.wc_init_threads()
+
 	b := &linuxBackend{}
 	b.passthrough.Store(true)
 	if _, _, err := b.ScreenSize(); err != nil {
